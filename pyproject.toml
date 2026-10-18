@@ -1,0 +1,50 @@
+[project]
+name = "agent-observability"
+version = "0.1.0"
+description = "Agente LangChain instrumentado para monitoramento de métricas em produção com LangSmith"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "httpx>=0.28",
+    "langchain>=1.4.6",
+    "langchain-google-genai>=4.4.2",
+    "langgraph>=1.2.16",
+    "langsmith>=0.14.11",
+    "python-dotenv>=1.2.4",
+    "rich>=15.0.0",
+    "uvicorn[standard]>=0.32",
+]
+
+[project.optional-dependencies]
+# só para treinar/rodar o modelo local: uv sync --extra finetune
+finetune = [
+    "torch>=2.9",
+    "transformers>=4.57",
+    "peft>=0.17",
+    "accelerate>=1.10",
+]
+
+[project.scripts]
+obs-ask = "agent_observability.cli:ask"
+obs-api = "agent_observability.api:main"
+obs-simulate = "agent_observability.simulate:main"
+obs-evaluate = "agent_observability.evaluate:main"
+obs-export-ft = "agent_observability.flywheel:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
