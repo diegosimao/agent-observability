@@ -1,7 +1,7 @@
 [project]
 name = "agent-observability"
 version = "0.1.0"
-description = "Agente LangChain instrumentado para monitoramento de métricas em produção com LangSmith"
+description = "Observability for LLM agents in production with LangChain + LangSmith: traces, metrics, A/B, pass^k, FastAPI and LoRA fine-tuning from traces"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# só para treinar/rodar o modelo local: uv sync --extra finetune
+# only needed to train/run the local model: uv sync --extra finetune
 finetune = [
     "torch>=2.9",
     "transformers>=4.57",

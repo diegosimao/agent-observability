@@ -1,4 +1,4 @@
-"""Configuração central: modo do LLM, versões de prompt e metadados de deploy."""
+"""Central configuration: LLM mode, prompt versions and deploy metadata."""
 
 import os
 from functools import cache
@@ -9,9 +9,9 @@ load_dotenv()
 
 APP_VERSION = os.getenv("APP_VERSION", "1.3.0")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-# id do Hugging Face (modelo base) ou pasta com o adaptador LoRA treinado
+# Hugging Face model id (base model) or a folder containing a trained LoRA adapter
 LOCAL_MODEL = os.getenv("LOCAL_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
-PROJECT = os.getenv("LANGSMITH_PROJECT", "agente-suporte-prod")
+PROJECT = os.getenv("LANGSMITH_PROJECT", "support-agent-prod")
 
 
 def llm_mode() -> str:
@@ -23,7 +23,7 @@ def llm_mode() -> str:
 
 @cache
 def project_id():
-    """id do projeto no LangSmith; o SDK passou a exigir em create_feedback."""
+    """LangSmith project id; the SDK now requires it in create_feedback."""
     from langsmith import Client
 
     return Client().read_project(project_name=PROJECT).id
@@ -45,20 +45,20 @@ def tracing_enabled() -> bool:
     )
 
 
-# Duas versões de system prompt rodando em paralelo (A/B) — cada trace grava
-# qual versão atendeu, e o dashboard compara latência, custo e satisfação.
+# Two system prompt versions running side by side (A/B). Every trace records
+# which version answered, and the dashboard compares latency, cost and satisfaction.
 PROMPTS = {
     "v1": (
-        "Você é o assistente de atendimento da loja online Vértice. "
-        "Use as ferramentas disponíveis para responder sobre pedidos, frete e políticas. "
-        "Seja educado e completo."
+        "You are the customer support assistant for the Vertice online store. "
+        "Use the available tools to answer questions about orders, shipping and policies. "
+        "Be polite and thorough."
     ),
     "v2": (
-        "Você é o assistente de atendimento da loja online Vértice.\n"
-        "Regras:\n"
-        "1. Sempre consulte uma ferramenta antes de afirmar algo sobre pedido, frete ou política.\n"
-        "2. Responda em no máximo 3 frases, em português.\n"
-        "3. Se o cliente pedir um humano ou estiver insatisfeito, abra um chamado.\n"
-        "4. Nunca invente número de pedido, prazo ou valor."
+        "You are the customer support assistant for the Vertice online store.\n"
+        "Rules:\n"
+        "1. Always check a tool before stating anything about an order, shipping or a policy.\n"
+        "2. Answer in at most 3 sentences.\n"
+        "3. If the customer asks for a human or is unhappy, open a ticket.\n"
+        "4. Never make up an order number, delivery time or price."
     ),
 }

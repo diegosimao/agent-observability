@@ -1,11 +1,11 @@
-"""API HTTP do agente — o "produção" de verdade que o simulador e um front-end chamam.
+"""HTTP API for the agent: the actual "production" that the simulator and a front end call.
 
     uv run obs-api            # http://localhost:8000/docs
 
-- POST /v1/chat          resposta completa + run_id
-- POST /v1/chat/stream   Server-Sent Events com cada passo do agente
-- POST /v1/feedback      👍/👎 do usuário, anexado ao trace no LangSmith
-- GET  /health           modo do LLM, tracing e versão
+- POST /v1/chat          full answer + run_id
+- POST /v1/chat/stream   Server-Sent Events with each agent step
+- POST /v1/feedback      user 👍/👎, attached to the trace in LangSmith
+- GET  /health           LLM mode, tracing and version
 """
 
 import hashlib
@@ -22,101 +22,101 @@ from langsmith import Client
 from pydantic import BaseModel, Field
 
 from . import chaos
-from .agent import atender, atender_stream
+from .agent import handle_message, handle_message_stream
 from .config import APP_VERSION, PROJECT, llm_mode, model_name, project_id, tracing_enabled
 
-app = FastAPI(title="Agente de suporte Vértice", version=APP_VERSION)
+app = FastAPI(title="Vertice support agent", version=APP_VERSION)
 
 
 class ChatIn(BaseModel):
-    mensagem: str = Field(min_length=1, max_length=2000)
-    sessao: str | None = Field(None, description="id estável do cliente; fixa a variante do A/B")
-    prompt_version: Literal["v1", "v2"] | None = Field(None, description="força uma variante (senão, A/B por sessão)")
-    plano: Literal["free", "plus", "enterprise"] = "free"
-    canal: Literal["web", "whatsapp", "app", "api"] = "api"
+    message: str = Field(min_length=1, max_length=2000)
+    session: str | None = Field(None, description="stable customer id; pins the A/B variant")
+    prompt_version: Literal["v1", "v2"] | None = Field(None, description="force a variant (otherwise A/B by session)")
+    plan: Literal["free", "plus", "enterprise"] = "free"
+    channel: Literal["web", "whatsapp", "app", "api"] = "api"
 
 
 class ChatOut(BaseModel):
     run_id: uuid.UUID
-    resposta: str
+    answer: str
     prompt_version: str
     tools: list[str]
-    tool_erros: int
+    tool_errors: int
     tokens: int
-    latencia_ms: int
+    latency_ms: int
 
 
 class FeedbackIn(BaseModel):
     run_id: uuid.UUID
     score: Literal[0, 1]
-    comentario: str | None = Field(None, max_length=500)
+    comment: str | None = Field(None, max_length=500)
 
 
-def variante(sessao: str | None) -> str:
-    """A/B determinístico: a mesma sessão sempre cai na mesma variante, então um
-    cliente não vê o comportamento do agente mudar no meio da conversa."""
-    if not sessao:
+def variant(session: str | None) -> str:
+    """Deterministic A/B: the same session always lands on the same variant, so a
+    customer never sees the agent's behavior change mid-conversation."""
+    if not session:
         return "v2"
-    return "v1" if hashlib.sha256(sessao.encode()).digest()[0] % 2 == 0 else "v2"
+    return "v1" if hashlib.sha256(session.encode()).digest()[0] % 2 == 0 else "v2"
 
 
 @app.middleware("http")
-async def tempo_de_resposta(request: Request, call_next):
-    inicio = time.perf_counter()
-    resposta = await call_next(request)
-    resposta.headers["Server-Timing"] = f"app;dur={(time.perf_counter() - inicio) * 1000:.0f}"
-    return resposta
+async def server_timing(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    response.headers["Server-Timing"] = f"app;dur={(time.perf_counter() - start) * 1000:.0f}"
+    return response
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "llm_mode": llm_mode(), "modelo": model_name(), "tracing": tracing_enabled(), "versao": APP_VERSION}
+    return {"status": "ok", "llm_mode": llm_mode(), "model": model_name(), "tracing": tracing_enabled(), "version": APP_VERSION}
 
 
 @app.post("/v1/chat", response_model=ChatOut)
 async def chat(body: ChatIn) -> ChatOut:
-    versao = body.prompt_version or variante(body.sessao)
-    # o agente é síncrono (tools bloqueantes); roda fora do event loop
+    version = body.prompt_version or variant(body.session)
+    # the agent is synchronous (blocking tools); run it off the event loop
     r = await run_in_threadpool(
-        atender, body.mensagem, prompt_version=versao, plano=body.plano, canal=body.canal, sessao=body.sessao, extra_tags=["api"]
+        handle_message, body.message, prompt_version=version, plan=body.plan, channel=body.channel, session=body.session, extra_tags=["api"]
     )
-    if r.erro:
-        # o run_id vai junto para o suporte achar o trace exato no LangSmith
-        raise HTTPException(503, detail={"erro": "agente indisponível", "run_id": str(r.run_id)})
+    if r.error:
+        # the run_id goes along so support can find the exact trace in LangSmith
+        raise HTTPException(503, detail={"error": "agent unavailable", "run_id": str(r.run_id)})
     return ChatOut(
         run_id=r.run_id,
-        resposta=r.resposta or "",
-        prompt_version=versao,
+        answer=r.answer or "",
+        prompt_version=version,
         tools=r.tools,
-        tool_erros=r.tool_erros,
+        tool_errors=r.tool_errors,
         tokens=r.tokens,
-        latencia_ms=int(r.latencia_s * 1000),
+        latency_ms=int(r.latency_s * 1000),
     )
 
 
 @app.post("/v1/chat/stream")
 def chat_stream(body: ChatIn) -> StreamingResponse:
-    versao = body.prompt_version or variante(body.sessao)
-    eventos = atender_stream(body.mensagem, prompt_version=versao, plano=body.plano, canal=body.canal, sessao=body.sessao)
-    sse = (f"data: {json.dumps(e, ensure_ascii=False)}\n\n" for e in eventos)
+    version = body.prompt_version or variant(body.session)
+    events = handle_message_stream(body.message, prompt_version=version, plan=body.plan, channel=body.channel, session=body.session)
+    sse = (f"data: {json.dumps(e, ensure_ascii=False)}\n\n" for e in events)
     return StreamingResponse(sse, media_type="text/event-stream")
 
 
 @app.post("/v1/feedback", status_code=202)
 def feedback(body: FeedbackIn) -> dict:
     if not tracing_enabled():
-        raise HTTPException(503, detail="LangSmith não configurado")
-    Client().create_feedback(body.run_id, key="user_score", score=body.score, comment=body.comentario, session_id=project_id())
-    return {"aceito": True, "projeto": PROJECT}
+        raise HTTPException(503, detail="LangSmith is not configured")
+    Client().create_feedback(body.run_id, key="user_score", score=body.score, comment=body.comment, session_id=project_id())
+    return {"accepted": True, "project": PROJECT}
 
 
-@app.post("/_chaos/{modo}", include_in_schema=False)
-def caos(modo: Literal["incidente", "normal"]) -> dict:
-    """Liga o incidente simulado neste processo. Só existe com CHAOS_ENDPOINT=true."""
+@app.post("/_chaos/{mode}", include_in_schema=False)
+def set_chaos(mode: Literal["incident", "normal"]) -> dict:
+    """Turns the simulated incident on in this process. Only exists with CHAOS_ENDPOINT=true."""
     if os.getenv("CHAOS_ENDPOINT", "").lower() != "true":
         raise HTTPException(404)
-    getattr(chaos, modo)()
-    return {"modo": modo}
+    getattr(chaos, mode)()
+    return {"mode": mode}
 
 
 def main() -> None:

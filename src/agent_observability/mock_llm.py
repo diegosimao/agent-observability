@@ -1,9 +1,9 @@
-"""LLM simulado que se comporta como um chat model real para o LangSmith.
+"""Simulated LLM that behaves like a real chat model as far as LangSmith can tell.
 
-Faz tool calling por palavras-chave, preenche `usage_metadata` (tokens) e se
-identifica como `gemini-2.5-flash` via `_get_ls_params`, então o LangSmith
-calcula custo, latência e tokens exatamente como faria com o modelo real.
-Assim a demo inteira roda sem gastar um centavo de API de LLM.
+It does tool calling by keyword, fills in `usage_metadata` (tokens) and reports
+itself as the configured Gemini model via `_get_ls_params`, so LangSmith computes
+cost, latency and tokens exactly as it would for the real model. The whole demo
+runs without spending a cent on LLM APIs.
 """
 
 import ast
@@ -21,20 +21,22 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from . import chaos
 from .config import GEMINI_MODEL
 
-_TEMAS = ("devol", "troca", "garantia", "reembols")
+# (keyword in the question, topic passed to get_policy)
+_POLICY_TOPICS = (("return", "returns"), ("exchang", "exchange"), ("swap", "exchange"), ("warrant", "warranty"), ("refund", "refund"))
+_ESCALATION_WORDS = ("human", "agent", "ridiculous", "complain", "terrible", "manager")
 
 
-def _tokens(texto: str) -> int:
-    return max(1, len(texto) // 4)
+def _tokens(text: str) -> int:
+    return max(1, len(text) // 4)
 
 
-def _parse(conteudo: str) -> Any:
+def _parse(content: str) -> Any:
     for loader in (json.loads, ast.literal_eval):
         try:
-            return loader(conteudo)
+            return loader(content)
         except (ValueError, SyntaxError):
             continue
-    return conteudo
+    return content
 
 
 class FakeSupportModel(BaseChatModel):
@@ -59,73 +61,73 @@ class FakeSupportModel(BaseChatModel):
     def _generate(self, messages: list[BaseMessage], stop=None, run_manager=None, **kwargs) -> ChatResult:
         if random.random() < chaos.state.llm_error_rate:
             time.sleep(random.uniform(0.5, 2.0) * chaos.state.latency_multiplier)
-            raise RuntimeError("503 UNAVAILABLE: modelo sobrecarregado (simulado)")
+            raise RuntimeError("503 UNAVAILABLE: model overloaded (simulated)")
 
-        conciso = "Regras:" in str(messages[0].content)
-        ultima = messages[-1]
+        concise = "Rules:" in str(messages[0].content)
+        last = messages[-1]
 
-        if isinstance(ultima, HumanMessage):
-            msg = self._planejar(str(ultima.content), conciso)
+        if isinstance(last, HumanMessage):
+            msg = self._plan(str(last.content), concise)
         else:
-            resultados = [m for m in messages if isinstance(m, ToolMessage)]
-            msg = AIMessage(content=self._responder(resultados, conciso))
+            results = [m for m in messages if isinstance(m, ToolMessage)]
+            msg = AIMessage(content=self._answer(results, concise))
 
-        entrada = sum(_tokens(str(m.content)) for m in messages) + 180 * len(self.tool_names)
-        saida = _tokens(str(msg.content)) + 25 * len(msg.tool_calls)
-        msg.usage_metadata = {"input_tokens": entrada, "output_tokens": saida, "total_tokens": entrada + saida}
+        input_tokens = sum(_tokens(str(m.content)) for m in messages) + 180 * len(self.tool_names)
+        output_tokens = _tokens(str(msg.content)) + 25 * len(msg.tool_calls)
+        msg.usage_metadata = {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": input_tokens + output_tokens}
         msg.response_metadata = {"model_name": self.model, "finish_reason": "STOP"}
 
-        # tempo ~ primeiro token + geração proporcional à saída
-        time.sleep((0.25 + saida * 0.004) * random.lognormvariate(0, 0.35) * chaos.state.latency_multiplier)
+        # time ~ first token + generation proportional to output length
+        time.sleep((0.25 + output_tokens * 0.004) * random.lognormvariate(0, 0.35) * chaos.state.latency_multiplier)
         return ChatResult(generations=[ChatGeneration(message=msg)])
 
-    def _planejar(self, texto: str, conciso: bool) -> AIMessage:
-        t = texto.lower()
+    def _plan(self, text: str, concise: bool) -> AIMessage:
+        t = text.lower()
         calls = []
-        if pedido := re.search(r"\b(\d{4})\b", t):
-            calls.append(("buscar_pedido", {"pedido_id": pedido.group(1)}))
-        if cep := re.search(r"\b(\d{5}-?\d{3})\b", t):
-            calls.append(("calcular_frete", {"cep": cep.group(1)}))
-        for tema in _TEMAS:
-            if tema in t:
-                calls.append(("consultar_politica", {"tema": tema}))
+        if order := re.search(r"\b(\d{4})\b", t):
+            calls.append(("get_order", {"order_id": order.group(1)}))
+        if zip_code := re.search(r"\b(\d{5}-?\d{3})\b", t):
+            calls.append(("calculate_shipping", {"zip_code": zip_code.group(1)}))
+        for keyword, topic in _POLICY_TOPICS:
+            if keyword in t:
+                calls.append(("get_policy", {"topic": topic}))
                 break
-        if any(p in t for p in ("humano", "atendente", "absurdo", "reclama", "péssimo")):
-            prioridade = "alta" if conciso or "absurdo" in t else "normal"
-            calls.append(("abrir_chamado", {"resumo": texto[:120], "prioridade": prioridade}))
+        if any(w in t for w in _ESCALATION_WORDS):
+            priority = "high" if concise or "ridiculous" in t else "normal"
+            calls.append(("create_ticket", {"summary": text[:120], "priority": priority}))
 
         calls = [(n, a) for n, a in calls if n in self.tool_names]
         if not calls:
-            resposta = "Posso ajudar com pedidos, frete, trocas e devoluções. Qual o número do seu pedido?"
-            if not conciso:
-                resposta = "Olá! Obrigado por entrar em contato com a Vértice. " + resposta + " Fico à disposição para o que precisar."
-            return AIMessage(content=resposta)
+            answer = "I can help with orders, shipping, exchanges and returns. What is your order number?"
+            if not concise:
+                answer = "Hello! Thank you for contacting Vertice. " + answer + " I'm happy to help with anything you need."
+            return AIMessage(content=answer)
         return AIMessage(
             content="",
             tool_calls=[{"name": n, "args": a, "id": f"call_{uuid.uuid4().hex[:12]}", "type": "tool_call"} for n, a in calls],
         )
 
-    def _responder(self, resultados: list[ToolMessage], conciso: bool) -> str:
-        partes = []
-        for r in resultados:
-            dado = _parse(str(r.content))
-            if "não encontrado" in str(r.content):
-                partes.append("Não encontrei esse número de pedido; pode conferir no e-mail de confirmação?")
+    def _answer(self, results: list[ToolMessage], concise: bool) -> str:
+        parts = []
+        for r in results:
+            data = _parse(str(r.content))
+            if "not found" in str(r.content):
+                parts.append("I couldn't find that order number; could you check your confirmation email?")
             elif r.status == "error" or "Error" in str(r.content):
-                partes.append("Não consegui consultar essa informação agora, desculpe — tente novamente em alguns minutos.")
-            elif r.name == "buscar_pedido":
-                partes.append(f"O pedido {dado['pedido_id']} está {dado['status']} (total R$ {dado['total']:.2f}).")
-            elif r.name == "calcular_frete":
-                partes.append(f"O frete para {dado['cep']} custa R$ {dado['valor']:.2f} com prazo de {dado['prazo_dias']} dias úteis.")
-            elif r.name == "consultar_politica":
-                partes.append(str(dado))
-            elif r.name == "abrir_chamado":
-                partes.append(f"Abri o chamado {dado['chamado']}; um atendente responde em até {dado['sla_horas']}h.")
-        texto = " ".join(partes)
-        if not conciso:
-            texto = (
-                "Olá! Agradeço muito por entrar em contato com a Vértice. Verifiquei as informações nos nossos sistemas. "
-                + texto
-                + " Caso tenha qualquer outra dúvida, sobre este ou outros pedidos, estou sempre à disposição para ajudar!"
+                parts.append("Sorry, I couldn't look that up right now. Please try again in a few minutes.")
+            elif r.name == "get_order":
+                parts.append(f"Order {data['order_id']} is {data['status']} (total R$ {data['total']:.2f}).")
+            elif r.name == "calculate_shipping":
+                parts.append(f"Shipping to {data['zip_code']} costs R$ {data['cost']:.2f} and takes {data['delivery_days']} business days.")
+            elif r.name == "get_policy":
+                parts.append(str(data))
+            elif r.name == "create_ticket":
+                parts.append(f"I opened ticket {data['ticket']}; a human agent will reply within {data['sla_hours']}h.")
+        text = " ".join(parts)
+        if not concise:
+            text = (
+                "Hello! Thank you so much for contacting Vertice. I checked the information in our systems. "
+                + text
+                + " If you have any other questions, about this or any other order, I'm always happy to help!"
             )
-        return texto
+        return text

@@ -1,4 +1,4 @@
-"""Controles de "caos" para simular incidentes de produção durante a demo."""
+"""Chaos controls that simulate production incidents during the demo."""
 
 from dataclasses import dataclass
 
@@ -13,8 +13,8 @@ class ChaosState:
 state = ChaosState()
 
 
-def incidente() -> None:
-    """Degradação típica: provedor lento, transportadora instável."""
+def incident() -> None:
+    """Typical degradation: slow LLM provider, flaky shipping carrier."""
     state.latency_multiplier = 4.0
     state.tool_error_rate = 0.45
     state.llm_error_rate = 0.12

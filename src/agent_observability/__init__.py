@@ -1,1 +1,1 @@
-"""Agente de suporte instrumentado para observabilidade com LangSmith."""
+"""Support agent instrumented for observability with LangSmith."""

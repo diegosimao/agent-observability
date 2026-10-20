@@ -1,10 +1,10 @@
-"""Agente de suporte (LangChain `create_agent`) e a chamada instrumentada.
+"""Support agent (LangChain `create_agent`) and the instrumented call.
 
-Toda a observabilidade vem de três coisas passadas no `config` de cada invoke:
-- `run_id`  : id conhecido de antemão, para anexar feedback do usuário depois
-- `tags`    : rótulos baixos em cardinalidade, bons para filtro rápido
-- `metadata`: dimensões para agrupar gráficos (versão do prompt, plano do
-              cliente, canal, release do app...)
+All the observability comes from three things passed in the `config` of each invoke:
+- `run_id`  : an id known up front, so user feedback can be attached later
+- `tags`    : low-cardinality labels, good for quick filtering
+- `metadata`: dimensions to group charts by (prompt version, customer plan,
+              channel, app release...)
 """
 
 import time
@@ -18,7 +18,10 @@ from langchain.agents.middleware import ToolErrorMiddleware
 from langchain_core.messages import AIMessage, ToolMessage
 
 from .config import APP_VERSION, GEMINI_MODEL, LOCAL_MODEL, PROMPTS, llm_mode, model_name
-from .tools import TOOLS, erro_para_o_modelo
+from .tools import TOOLS, tool_error_to_model
+
+# Name of the root trace of every conversation; dashboards and the flywheel filter on it.
+RUN_NAME = "support-chat"
 
 
 def _model():
@@ -43,100 +46,100 @@ def build_agent(prompt_version: str):
         _model(),
         TOOLS,
         system_prompt=PROMPTS[prompt_version],
-        middleware=[ToolErrorMiddleware(on_error=erro_para_o_modelo)],
-        name="agente-suporte",
+        middleware=[ToolErrorMiddleware(on_error=tool_error_to_model)],
+        name="support-agent",
     )
 
 
 @dataclass
-class Resultado:
+class AgentResult:
     run_id: uuid.UUID
-    resposta: str | None
-    erro: str | None
-    latencia_s: float
+    answer: str | None
+    error: str | None
+    latency_s: float
     tokens: int = 0
     tools: list[str] = field(default_factory=list)
-    tool_erros: int = 0
+    tool_errors: int = 0
 
 
-def _config(run_id: uuid.UUID, prompt_version: str, plano: str, canal: str, categoria: str, extra_tags, sessao: str | None) -> dict:
+def _config(run_id: uuid.UUID, prompt_version: str, plan: str, channel: str, category: str, extra_tags, session: str | None) -> dict:
     metadata = {
         "prompt_version": prompt_version,
-        "plano_cliente": plano,
-        "canal": canal,
-        "categoria": categoria,
+        "customer_plan": plan,
+        "channel": channel,
+        "category": category,
         "app_version": APP_VERSION,
         "llm_mode": llm_mode(),
-        "modelo": model_name(),
+        "model": model_name(),
     }
-    if sessao:
-        # `session_id` é a chave que o LangSmith usa para agrupar traces em Threads
-        metadata["session_id"] = sessao
+    if session:
+        # `session_id` is the key LangSmith uses to group traces into Threads
+        metadata["session_id"] = session
     return {
         "run_id": run_id,
-        "run_name": "atendimento",
-        "tags": ["suporte", f"prompt:{prompt_version}", f"canal:{canal}", *(extra_tags or [])],
+        "run_name": RUN_NAME,
+        "tags": ["support", f"prompt:{prompt_version}", f"channel:{channel}", *(extra_tags or [])],
         "metadata": metadata,
     }
 
 
-def atender(
-    pergunta: str,
+def handle_message(
+    message: str,
     *,
     prompt_version: str = "v2",
-    plano: str = "free",
-    canal: str = "web",
-    categoria: str = "geral",
+    plan: str = "free",
+    channel: str = "web",
+    category: str = "general",
     extra_tags: list[str] | None = None,
-    sessao: str | None = None,
-) -> Resultado:
+    session: str | None = None,
+) -> AgentResult:
     run_id = uuid.uuid4()
-    config = _config(run_id, prompt_version, plano, canal, categoria, extra_tags, sessao)
-    inicio = time.perf_counter()
+    config = _config(run_id, prompt_version, plan, channel, category, extra_tags, session)
+    start = time.perf_counter()
     try:
-        estado = build_agent(prompt_version).invoke({"messages": [{"role": "user", "content": pergunta}]}, config=config)
-    except Exception as exc:  # o trace no LangSmith já registra o erro; aqui só contabilizamos
-        return Resultado(run_id, None, f"{type(exc).__name__}: {exc}", time.perf_counter() - inicio)
+        state = build_agent(prompt_version).invoke({"messages": [{"role": "user", "content": message}]}, config=config)
+    except Exception as exc:  # the LangSmith trace already records the error; here we just count it
+        return AgentResult(run_id, None, f"{type(exc).__name__}: {exc}", time.perf_counter() - start)
 
-    msgs = estado["messages"]
+    msgs = state["messages"]
     tool_msgs = [m for m in msgs if isinstance(m, ToolMessage)]
-    return Resultado(
+    return AgentResult(
         run_id=run_id,
-        resposta=msgs[-1].text,  # Gemini 3 devolve blocos (texto + assinatura de raciocínio)
-        erro=None,
-        latencia_s=time.perf_counter() - inicio,
+        answer=msgs[-1].text,  # Gemini 3 returns content blocks (text + reasoning signature)
+        error=None,
+        latency_s=time.perf_counter() - start,
         tokens=sum((m.usage_metadata or {}).get("total_tokens", 0) for m in msgs if isinstance(m, AIMessage)),
         tools=[m.name for m in tool_msgs],
-        tool_erros=sum(1 for m in tool_msgs if m.status == "error"),
+        tool_errors=sum(1 for m in tool_msgs if m.status == "error"),
     )
 
 
-def atender_stream(
-    pergunta: str,
+def handle_message_stream(
+    message: str,
     *,
     prompt_version: str = "v2",
-    plano: str = "free",
-    canal: str = "web",
-    sessao: str | None = None,
+    plan: str = "free",
+    channel: str = "web",
+    session: str | None = None,
 ) -> Iterator[dict]:
-    """Mesmo trace de `atender`, mas emite cada passo do agente assim que ele
-    acontece: chamada de ferramenta, resultado e resposta final."""
+    """Same trace as `handle_message`, but emits each agent step as it happens:
+    tool call, tool result and final answer."""
     run_id = uuid.uuid4()
-    config = _config(run_id, prompt_version, plano, canal, "geral", ["stream"], sessao)
-    yield {"evento": "inicio", "run_id": str(run_id), "prompt_version": prompt_version}
+    config = _config(run_id, prompt_version, plan, channel, "general", ["stream"], session)
+    yield {"event": "start", "run_id": str(run_id), "prompt_version": prompt_version}
     try:
-        for passo in build_agent(prompt_version).stream(
-            {"messages": [{"role": "user", "content": pergunta}]}, config=config, stream_mode="updates"
+        for step in build_agent(prompt_version).stream(
+            {"messages": [{"role": "user", "content": message}]}, config=config, stream_mode="updates"
         ):
-            for atualizacao in passo.values():
-                for m in (atualizacao or {}).get("messages", []):
+            for update in step.values():
+                for m in (update or {}).get("messages", []):
                     if isinstance(m, AIMessage) and m.tool_calls:
                         for tc in m.tool_calls:
-                            yield {"evento": "tool_call", "tool": tc["name"], "args": tc["args"]}
+                            yield {"event": "tool_call", "tool": tc["name"], "args": tc["args"]}
                     elif isinstance(m, ToolMessage):
-                        yield {"evento": "tool_result", "tool": m.name, "ok": m.status != "error"}
+                        yield {"event": "tool_result", "tool": m.name, "ok": m.status != "error"}
                     elif isinstance(m, AIMessage):
-                        yield {"evento": "resposta", "texto": m.text}
+                        yield {"event": "answer", "text": m.text}
     except Exception as exc:
-        yield {"evento": "erro", "erro": f"{type(exc).__name__}: {exc}"}
-    yield {"evento": "fim", "run_id": str(run_id)}
+        yield {"event": "error", "error": f"{type(exc).__name__}: {exc}"}
+    yield {"event": "end", "run_id": str(run_id)}

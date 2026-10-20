@@ -1,9 +1,9 @@
-"""Chat model local (Hugging Face transformers) com tool calling no formato Qwen.
+"""Local chat model (Hugging Face transformers) with Qwen-style tool calling.
 
-Carrega um modelo base ou um adaptador LoRA treinado por `finetune/train_lora.py`
-e se pluga no mesmo `create_agent` — o LangSmith vê tokens, latência e tools
-exatamente como vê o Gemini, então base × LoRA × Gemini viram experimentos
-comparáveis lado a lado.
+Loads a base model or a LoRA adapter trained by `finetune/train_lora.py` and
+plugs into the same `create_agent`. LangSmith sees tokens, latency and tools
+exactly as it does for Gemini, so base vs. LoRA vs. Gemini become experiments
+you can compare side by side.
 """
 
 import json
@@ -19,52 +19,52 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 _TOOL_CALL = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
-_lock = threading.Lock()  # uma GPU, uma geração por vez
+_lock = threading.Lock()  # one GPU, one generation at a time
 
 
 @cache
-def _carregar(model_path: str):
+def _load(model_path: str):
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    adaptador = Path(model_path) / "adapter_config.json"
-    if adaptador.exists():
+    adapter = Path(model_path) / "adapter_config.json"
+    if adapter.exists():
         from peft import AutoPeftModelForCausalLM
 
-        modelo = AutoPeftModelForCausalLM.from_pretrained(model_path, dtype=torch.bfloat16, device_map="auto")
+        model = AutoPeftModelForCausalLM.from_pretrained(model_path, dtype=torch.bfloat16, device_map="auto")
     else:
-        modelo = AutoModelForCausalLM.from_pretrained(model_path, dtype=torch.bfloat16, device_map="auto")
+        model = AutoModelForCausalLM.from_pretrained(model_path, dtype=torch.bfloat16, device_map="auto")
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    return modelo.eval(), tokenizer
+    return model.eval(), tokenizer
 
 
-def para_chat_template(messages: list[BaseMessage]) -> list[dict]:
-    """Mensagens LangChain → formato de chat do Hugging Face (o mesmo do treino)."""
-    saida = []
+def to_chat_template(messages: list[BaseMessage]) -> list[dict]:
+    """LangChain messages → Hugging Face chat format (the same one used in training)."""
+    out = []
     for m in messages:
         if isinstance(m, SystemMessage):
-            saida.append({"role": "system", "content": m.text})
+            out.append({"role": "system", "content": m.text})
         elif isinstance(m, HumanMessage):
-            saida.append({"role": "user", "content": m.text})
+            out.append({"role": "user", "content": m.text})
         elif isinstance(m, AIMessage):
             item = {"role": "assistant", "content": m.text}
             if m.tool_calls:
                 item["tool_calls"] = [{"type": "function", "function": {"name": tc["name"], "arguments": tc["args"]}} for tc in m.tool_calls]
-            saida.append(item)
+            out.append(item)
         elif isinstance(m, ToolMessage):
-            saida.append({"role": "tool", "name": m.name, "content": m.text})
-    return saida
+            out.append({"role": "tool", "name": m.name, "content": m.text})
+    return out
 
 
-def extrair_tool_calls(texto: str) -> tuple[str, list[dict]]:
+def parse_tool_calls(text: str) -> tuple[str, list[dict]]:
     calls = []
-    for bloco in _TOOL_CALL.findall(texto):
+    for block in _TOOL_CALL.findall(text):
         try:
-            dado = json.loads(bloco)
-            calls.append({"name": dado["name"], "args": dado.get("arguments", {}), "id": f"call_{uuid.uuid4().hex[:12]}", "type": "tool_call"})
+            data = json.loads(block)
+            calls.append({"name": data["name"], "args": data.get("arguments", {}), "id": f"call_{uuid.uuid4().hex[:12]}", "type": "tool_call"})
         except (json.JSONDecodeError, KeyError):
-            continue  # tool call malformada: o modelo pequeno às vezes erra o JSON
-    return _TOOL_CALL.sub("", texto).strip(), calls
+            continue  # malformed tool call: small models sometimes get the JSON wrong
+    return _TOOL_CALL.sub("", text).strip(), calls
 
 
 class LocalChatModel(BaseChatModel):
@@ -88,19 +88,19 @@ class LocalChatModel(BaseChatModel):
     def _generate(self, messages: list[BaseMessage], stop=None, run_manager=None, **kwargs) -> ChatResult:
         import torch
 
-        modelo, tokenizer = _carregar(self.model_path)
+        model, tokenizer = _load(self.model_path)
         ids = tokenizer.apply_chat_template(
-            para_chat_template(messages),
+            to_chat_template(messages),
             tools=self.tools_schema or None,
             add_generation_prompt=True,
-            return_dict=True,  # transformers 5 sempre devolve dict; explícito para funcionar no 4.x também
+            return_dict=True,  # transformers 5 always returns a dict; explicit so 4.x works too
             return_tensors="pt",
-        )["input_ids"].to(modelo.device)
+        )["input_ids"].to(model.device)
         with _lock, torch.inference_mode():
-            gerado = modelo.generate(ids, max_new_tokens=self.max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
-        novos = gerado[0, ids.shape[1]:]
-        texto, calls = extrair_tool_calls(tokenizer.decode(novos, skip_special_tokens=True))
-        msg = AIMessage(content=texto, tool_calls=calls)
-        msg.usage_metadata = {"input_tokens": ids.shape[1], "output_tokens": len(novos), "total_tokens": ids.shape[1] + len(novos)}
+            generated = model.generate(ids, max_new_tokens=self.max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
+        new_tokens = generated[0, ids.shape[1]:]
+        text, calls = parse_tool_calls(tokenizer.decode(new_tokens, skip_special_tokens=True))
+        msg = AIMessage(content=text, tool_calls=calls)
+        msg.usage_metadata = {"input_tokens": ids.shape[1], "output_tokens": len(new_tokens), "total_tokens": ids.shape[1] + len(new_tokens)}
         msg.response_metadata = {"model_name": Path(self.model_path).name}
         return ChatResult(generations=[ChatGeneration(message=msg)])
